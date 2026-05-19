@@ -7,100 +7,111 @@ import {
   signOut,
 } from 'firebase/auth';
 import toast from 'react-hot-toast';
-import { auth, hasFirebaseConfig } from '../firebase/config.js';
-import { adminsSeed } from '../data/demoData.js';
-import { createDocument, findUserByEmail, getDocument } from '../services/firestoreService.js';
+import { auth } from '../firebase/config.js';
+import { getDocument } from '../services/firestoreService.js';
 
 const AuthContext = createContext(null);
 
-const demoSessionKey = 'educrm_demo_user';
+const STORAGE_KEY = 'educrm_user';
 
-const readStoredUser = () => {
-  const saved = localStorage.getItem(demoSessionKey);
-  if (!saved || saved === 'undefined' || saved === 'null') return null;
-
+const safeParse = (data) => {
   try {
-    return JSON.parse(saved);
+    if (!data || data === 'undefined' || data === 'null') return null;
+    return JSON.parse(data);
   } catch {
-    localStorage.removeItem(demoSessionKey);
     return null;
   }
 };
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState(() => safeParse(localStorage.getItem(STORAGE_KEY)));
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!hasFirebaseConfig || !auth) {
-      setUser(readStoredUser());
+    if (!auth) {
+      setUser(null);
       setLoading(false);
-      return undefined;
+      return;
     }
 
-    return onAuthStateChanged(auth, async (firebaseUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (!firebaseUser) {
+        setUser(null);
+        localStorage.removeItem(STORAGE_KEY);
+        setLoading(false);
+        return;
+      }
+
+      const profile = await getDocument('users', firebaseUser.uid);
+
+      if (!profile) {
+        toast.error('Foydalanuvchi Firestore da topilmadi');
         setUser(null);
         setLoading(false);
         return;
       }
 
-      const email = firebaseUser.email || '';
-      const isDirector = email.toLowerCase().includes('director');
-      const profile = (await getDocument('users', firebaseUser.uid)) || (await findUserByEmail(email));
-      const fallbackProfile = {
+      const finalUser = {
         uid: firebaseUser.uid,
-        fullName: firebaseUser.displayName || (isDirector ? 'Direktor' : 'Admin'),
-        email,
-        role: isDirector ? 'director' : 'admin',
-        status: 'active',
+        email: firebaseUser.email,
+        fullName: profile.fullName,
+        role: profile.role,
+        status: profile.status,
       };
-      const mergedProfile = { ...fallbackProfile, ...profile, uid: firebaseUser.uid };
 
-      if (!profile) {
-        await createDocument('users', { ...mergedProfile, id: firebaseUser.uid });
-      }
-
-      setUser({
-        uid: mergedProfile.uid,
-        email: mergedProfile.email,
-        fullName: mergedProfile.fullName,
-        role: mergedProfile.role,
-        status: mergedProfile.status,
-      });
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUser));
+      setUser(finalUser);
       setLoading(false);
     });
+
+    return () => unsubscribe();
   }, []);
 
   const login = async ({ email, password }) => {
-    if (!hasFirebaseConfig || !auth) {
-      const role = email.toLowerCase().includes('director') ? 'director' : 'admin';
-      const demoUser = adminsSeed.find((item) => item.role === role) || {
-        id: `demo-${role}`,
-        fullName: role === 'director' ? 'Direktor' : 'Admin',
-        email,
-        role,
-        status: 'active',
-      };
-      localStorage.setItem(demoSessionKey, JSON.stringify(demoUser));
-      setUser(demoUser);
-      toast.success(role === 'director' ? 'Direktor sifatida kirdingiz' : 'Admin sifatida kirdingiz');
-      return demoUser;
+    if (!auth) {
+      throw new Error('Firebase ulanmagan');
     }
 
     await setPersistence(auth, browserLocalPersistence);
+
     const credential = await signInWithEmailAndPassword(auth, email, password);
-    return credential.user;
+
+    const profile = await getDocument('users', credential.user.uid);
+
+    if (!profile) {
+      throw new Error('User Firestore da yo‘q');
+    }
+
+    const finalUser = {
+      uid: credential.user.uid,
+      email: credential.user.email,
+      fullName: profile.fullName,
+      role: profile.role,
+      status: profile.status,
+    };
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUser));
+    setUser(finalUser);
+
+    toast.success('Muvaffaqiyatli kirildi');
+
+    return finalUser;
   };
 
   const logout = async () => {
     if (auth) await signOut(auth);
-    localStorage.removeItem(demoSessionKey);
+    localStorage.removeItem(STORAGE_KEY);
     setUser(null);
     toast.success('Tizimdan chiqdingiz');
   };
 
-  const value = useMemo(() => ({ user, loading, login, logout, isDirector: user?.role === 'director' }), [user, loading]);
+  const value = useMemo(() => ({
+    user,
+    loading,
+    login,
+    logout,
+    isDirector: user?.role === 'director',
+  }), [user, loading]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
